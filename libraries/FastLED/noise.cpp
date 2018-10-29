@@ -1,25 +1,10 @@
-#include <FastLED.h>
+#define FASTLED_INTERNAL
+#include "FastLED.h"
+#include <string.h>
 
-#ifdef FASTLED_AVR
-#include <avr/pgmspace.h>
-#define USE_PROGMEM
-#endif
+FASTLED_NAMESPACE_BEGIN
 
-// Workaround for http://gcc.gnu.org/bugzilla/show_bug.cgi?id=34734
-#ifdef FASTLED_AVR
-#ifdef PROGMEM
-#undef PROGMEM
-#define PROGMEM __attribute__((section(".progmem.data")))
-#endif
-#endif
-
-#ifdef USE_PROGMEM
-#define FL_PROGMEM PROGMEM
-#define P(x) pgm_read_byte_near(p + x)
-#else
-#define FL_PROGMEM
-#define P(x) p[(x)]
-#endif
+#define P(x) FL_PGM_READ_BYTE_NEAR(p + x)
 
 FL_PROGMEM static uint8_t const p[] = { 151,160,137,91,90,15,
    131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
@@ -36,6 +21,46 @@ FL_PROGMEM static uint8_t const p[] = { 151,160,137,91,90,15,
    138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180,151
    };
 
+
+#if FASTLED_NOISE_ALLOW_AVERAGE_TO_OVERFLOW == 1
+#define AVG15(U,V) (((U)+(V)) >> 1)
+#else
+// See if we should use the inlined avg15 for AVR with MUL instruction
+#if defined(__AVR__) && (LIB8_ATTINY == 0)
+#define AVG15(U,V) (avg15_inline_avr_mul((U),(V)))
+// inlined copy of avg15 for AVR with MUL instruction; cloned from math8.h
+// Forcing this inline in the 3-D 16bit noise produces a 12% speedup overall,
+// at a cost of just +8 bytes of net code size.
+static int16_t inline __attribute__((always_inline))  avg15_inline_avr_mul( int16_t i, int16_t j)
+{
+    asm volatile(
+                 /* first divide j by 2, throwing away lowest bit */
+                 "asr %B[j]          \n\t"
+                 "ror %A[j]          \n\t"
+                 /* now divide i by 2, with lowest bit going into C */
+                 "asr %B[i]          \n\t"
+                 "ror %A[i]          \n\t"
+                 /* add j + C to i */
+                 "adc %A[i], %A[j]   \n\t"
+                 "adc %B[i], %B[j]   \n\t"
+                 : [i] "+a" (i)
+                 : [j] "a"  (j) );
+    return i;
+}
+#else
+#define AVG15(U,V) (avg15((U),(V)))
+#endif
+#endif
+
+// See fastled_config.h for notes on this; 
+// "#define FASTLED_NOISE_FIXED 1" is the correct value
+#if FASTLED_NOISE_FIXED == 0
+#define EASE8(x)  (FADE(x) )
+#define EASE16(x) (FADE(x) )
+#else
+#define EASE8(x)  (ease8InOutQuad(x) )
+#define EASE16(x) (ease16InOutQuad(x))
+#endif
 //
 // #define FADE_12
 #define FADE_16
@@ -47,7 +72,7 @@ FL_PROGMEM static uint8_t const p[] = { 151,160,137,91,90,15,
 #define FADE(x) scale16(x,x)
 #define LERP(a,b,u) lerp15by16(a,b,u)
 #endif
-static int16_t __attribute__((always_inline))  grad16(uint8_t hash, int16_t x, int16_t y, int16_t z) {
+static int16_t inline __attribute__((always_inline))  grad16(uint8_t hash, int16_t x, int16_t y, int16_t z) {
 #if 0
   switch(hash & 0xF) {
     case  0: return (( x) + ( y))>>1;
@@ -74,21 +99,21 @@ static int16_t __attribute__((always_inline))  grad16(uint8_t hash, int16_t x, i
   if(hash&1) { u = -u; }
   if(hash&2) { v = -v; }
 
-  return (u+v)>>1;
+  return AVG15(u,v);
 #endif
 }
 
-static int16_t __attribute__((always_inline)) grad16(uint8_t hash, int16_t x, int16_t y) {
+static int16_t inline __attribute__((always_inline)) grad16(uint8_t hash, int16_t x, int16_t y) {
   hash = hash & 7;
   int16_t u,v;
   if(hash < 4) { u = x; v = y; } else { u = y; v = x; }
   if(hash&1) { u = -u; }
   if(hash&2) { v = -v; }
 
-  return (u+v)>>1;
+  return AVG15(u,v);
 }
 
-static int16_t __attribute__((always_inline)) grad16(uint8_t hash, int16_t x) {
+static int16_t inline __attribute__((always_inline)) grad16(uint8_t hash, int16_t x) {
   hash = hash & 15;
   int16_t u,v;
   if(hash > 8) { u=x;v=x; }
@@ -97,10 +122,33 @@ static int16_t __attribute__((always_inline)) grad16(uint8_t hash, int16_t x) {
   if(hash&1) { u = -u; }
   if(hash&2) { v = -v; }
 
-  return (u+v)>>1;
+  return AVG15(u,v);
 }
 
-static int8_t  __attribute__((always_inline)) grad8(uint8_t hash, int8_t x, int8_t y, int8_t z) {
+// selectBasedOnHashBit performs this:
+//   result = (hash & (1<<bitnumber)) ? a : b
+// but with an AVR asm version that's smaller and quicker than C
+// (and probably not worth including in lib8tion)
+static int8_t inline __attribute__((always_inline)) selectBasedOnHashBit(uint8_t hash, uint8_t bitnumber, int8_t a, int8_t b) {
+	int8_t result;
+#if !defined(__AVR__)
+	result = (hash & (1<<bitnumber)) ? a : b;
+#else
+	asm volatile(
+		"mov %[result],%[a]          \n\t"
+		"sbrs %[hash],%[bitnumber]   \n\t"
+		"mov %[result],%[b]          \n\t"
+		: [result] "=r" (result)
+		: [hash] "r" (hash),
+		  [bitnumber] "M" (bitnumber),
+          [a] "r" (a),
+		  [b] "r" (b)
+		);
+#endif
+	return result;
+}
+
+static int8_t  inline __attribute__((always_inline)) grad8(uint8_t hash, int8_t x, int8_t y, int8_t z) {
 #if 0
   switch(hash & 0xF) {
     case  0: return (( x) + ( y))>>1;
@@ -121,36 +169,75 @@ static int8_t  __attribute__((always_inline)) grad8(uint8_t hash, int8_t x, int8
     case 15: return ((-y) + (-z))>>1;
   }
 #else
+
   hash &= 0xF;
-  int8_t u = (hash&8)?y:x;
-  int8_t v = hash<4?y:hash==12||hash==14?x:z;
+
+  int8_t u, v;
+  //u = (hash&8)?y:x;
+  u = selectBasedOnHashBit( hash, 3, y, x);
+
+#if 1
+  v = hash<4?y:hash==12||hash==14?x:z;
+#else
+  // Verbose version for analysis; generates idenitical code.
+  if( hash < 4) { // 00 01 02 03
+	  v = y;
+  } else {
+      if( hash==12 || hash==14) { // 0C 0E
+		  v = x;
+	  } else {
+		  v = z; // 04 05 06 07   08 09 0A 0B   0D  0F
+	  }
+  }
+#endif
+
   if(hash&1) { u = -u; }
   if(hash&2) { v = -v; }
 
-  return (u+v)>>1;
+  return avg7(u,v);
 #endif
 }
 
-static int8_t __attribute__((always_inline)) grad8(uint8_t hash, int8_t x, int8_t y) {
-  hash = hash & 7;
+static int8_t inline __attribute__((always_inline)) grad8(uint8_t hash, int8_t x, int8_t y)
+{
+  // since the tests below can be done bit-wise on the bottom
+  // three bits, there's no need to mask off the higher bits
+  //  hash = hash & 7;
+
   int8_t u,v;
-  if(hash < 4) { u = x; v = y; } else { u = y; v = x; }
+  if( hash & 4) {
+	  u = y; v = x;
+  } else {
+	  u = x; v = y;
+  }
+
   if(hash&1) { u = -u; }
   if(hash&2) { v = -v; }
 
-  return (u+v)>>1;
+  return avg7(u,v);
 }
 
-static int8_t __attribute__((always_inline)) grad8(uint8_t hash, int8_t x) {
-  hash = hash & 15;
+static int8_t inline __attribute__((always_inline)) grad8(uint8_t hash, int8_t x)
+{
+  // since the tests below can be done bit-wise on the bottom
+  // four bits, there's no need to mask off the higher bits
+  //	hash = hash & 15;
+
   int8_t u,v;
-  if(hash > 8) { u=x;v=x; }
-  else if(hash < 4) { u=x;v=1; }
-  else { u=1;v=x; }
+  if(hash & 8) {
+	  u=x; v=x;
+  } else {
+	if(hash & 4) {
+		u=1; v=x;
+	} else {
+		u=x; v=1;
+	}
+  }
+
   if(hash&1) { u = -u; }
   if(hash&2) { v = -v; }
 
-  return (u+v)>>1;
+  return avg7(u,v);
 }
 
 
@@ -159,7 +246,7 @@ uint16_t logfade12(uint16_t val) {
   return scale16(val,val)>>4;
 }
 
-static int16_t __attribute__((always_inline)) lerp15by12( int16_t a, int16_t b, fract16 frac)
+static int16_t inline __attribute__((always_inline)) lerp15by12( int16_t a, int16_t b, fract16 frac)
 {
    //if(1) return (lerp(frac,a,b));
     int16_t result;
@@ -176,7 +263,7 @@ static int16_t __attribute__((always_inline)) lerp15by12( int16_t a, int16_t b, 
 }
 #endif
 
-static int8_t __attribute__((always_inline)) lerp7by8( int8_t a, int8_t b, fract8 frac)
+static int8_t inline __attribute__((always_inline)) lerp7by8( int8_t a, int8_t b, fract8 frac)
 {
     // int8_t delta = b - a;
     // int16_t prod = (uint16_t)delta * (uint16_t)frac;
@@ -222,8 +309,7 @@ int16_t inoise16_raw(uint32_t x, uint32_t y, uint32_t z)
   int16_t zz = (w >> 1) & 0x7FFF;
   uint16_t N = 0x8000L;
 
-  u = FADE(u); v = FADE(v); w = FADE(w);
-
+  u = EASE16(u); v = EASE16(v); w = EASE16(w);
 
   // skip the log fade adjustment for the moment, otherwise here we would
   // adjust fade values for u,v,w
@@ -244,7 +330,13 @@ uint16_t inoise16(uint32_t x, uint32_t y, uint32_t z) {
   int32_t ans = inoise16_raw(x,y,z);
   ans = ans + 19052L;
   uint32_t pan = ans;
-  return (pan*220L)>>7;
+  // pan = (ans * 220L) >> 7.  That's the same as:
+  // pan = (ans * 440L) >> 8.  And this way avoids a 7X four-byte shift-loop on AVR.
+  // Identical math, except for the highest bit, which we don't care about anyway,
+  // since we're returning the 'middle' 16 out of a 32-bit value anyway.
+  pan *= 440L;
+  return (pan>>8);
+
   // // return scale16by8(pan,220)<<1;
   // return ((inoise16_raw(x,y,z)+19052)*220)>>7;
   // return scale16by8(inoise16_raw(x,y,z)+19052,220)<<1;
@@ -273,7 +365,7 @@ int16_t inoise16_raw(uint32_t x, uint32_t y)
   int16_t yy = (v >> 1) & 0x7FFF;
   uint16_t N = 0x8000L;
 
-  u = FADE(u); v = FADE(v);
+  u = EASE16(u); v = EASE16(v);
 
   int16_t X1 = LERP(grad16(P(AA), xx, yy), grad16(P(BA), xx - N, yy), u);
   int16_t X2 = LERP(grad16(P(AB), xx, yy-N), grad16(P(BB), xx - N, yy - N), u);
@@ -287,7 +379,13 @@ uint16_t inoise16(uint32_t x, uint32_t y) {
   int32_t ans = inoise16_raw(x,y);
   ans = ans + 17308L;
   uint32_t pan = ans;
-  return (pan*242L)>>7;
+  // pan = (ans * 242L) >> 7.  That's the same as:
+  // pan = (ans * 484L) >> 8.  And this way avoids a 7X four-byte shift-loop on AVR.
+  // Identical math, except for the highest bit, which we don't care about anyway,
+  // since we're returning the 'middle' 16 out of a 32-bit value anyway.
+  pan *= 484L;
+  return (pan>>8);
+    
   // return (uint32_t)(((int32_t)inoise16_raw(x,y)+(uint32_t)17308)*242)>>7;
   // return scale16by8(inoise16_raw(x,y)+17308,242)<<1;
 }
@@ -310,7 +408,7 @@ int16_t inoise16_raw(uint32_t x)
   int16_t xx = (u >> 1) & 0x7FFF;
   uint16_t N = 0x8000L;
 
-  u = FADE(u);
+  u = EASE16(u);
 
   int16_t ans = LERP(grad16(P(AA), xx), grad16(P(BA), xx - N), u);
 
@@ -342,14 +440,13 @@ int8_t inoise8_raw(uint16_t x, uint16_t y, uint16_t z)
   uint8_t w = z;
 
   // Get a signed version of the above for the grad function
-  int8_t xx = (x>>1) & 0x7F;
-  int8_t yy = (y>>1) & 0x7F;
-  int8_t zz = (z>>1) & 0x7F;
+  int8_t xx = ((uint8_t)(x)>>1) & 0x7F;
+  int8_t yy = ((uint8_t)(y)>>1) & 0x7F;
+  int8_t zz = ((uint8_t)(z)>>1) & 0x7F;
   uint8_t N = 0x80;
 
-  // u = FADE(u); v = FADE(v); w = FADE(w);
-  u = scale8_LEAVING_R1_DIRTY(u,u); v = scale8_LEAVING_R1_DIRTY(v,v); w = scale8(w,w);
-
+  u = EASE8(u); v = EASE8(v); w = EASE8(w);
+    
   int8_t X1 = lerp7by8(grad8(P(AA), xx, yy, zz), grad8(P(BA), xx - N, yy, zz), u);
   int8_t X2 = lerp7by8(grad8(P(AB), xx, yy-N, zz), grad8(P(BB), xx - N, yy - N, zz), u);
   int8_t X3 = lerp7by8(grad8(P(AA+1), xx, yy, zz-N), grad8(P(BA+1), xx - N, yy, zz-N), u);
@@ -364,7 +461,11 @@ int8_t inoise8_raw(uint16_t x, uint16_t y, uint16_t z)
 }
 
 uint8_t inoise8(uint16_t x, uint16_t y, uint16_t z) {
-  return scale8(76+(inoise8_raw(x,y,z)),215)<<1;
+//  return scale8(76+(inoise8_raw(x,y,z)),215)<<1;
+    int8_t n = inoise8_raw( x, y, z);  // -64..+64
+    n+= 64;                            //   0..128
+    uint8_t ans = qadd8( n, n);        //   0..255
+    return ans;
 }
 
 int8_t inoise8_raw(uint16_t x, uint16_t y)
@@ -386,13 +487,12 @@ int8_t inoise8_raw(uint16_t x, uint16_t y)
   uint8_t v = y;
 
   // Get a signed version of the above for the grad function
-  int8_t xx = (x>>1) & 0x7F;
-  int8_t yy = (y>>1) & 0x7F;
+  int8_t xx = ((uint8_t)(x)>>1) & 0x7F;
+  int8_t yy = ((uint8_t)(y)>>1) & 0x7F;
   uint8_t N = 0x80;
 
-  // u = FADE(u); v = FADE(v); w = FADE(w);
-  u = scale8_LEAVING_R1_DIRTY(u,u); v = scale8(v,v);
-
+  u = EASE8(u); v = EASE8(v);
+  
   int8_t X1 = lerp7by8(grad8(P(AA), xx, yy), grad8(P(BA), xx - N, yy), u);
   int8_t X2 = lerp7by8(grad8(P(AB), xx, yy-N), grad8(P(BB), xx - N, yy - N), u);
 
@@ -402,10 +502,17 @@ int8_t inoise8_raw(uint16_t x, uint16_t y)
   // return scale8((70+(ans)),234)<<1;
 }
 
+
+
 uint8_t inoise8(uint16_t x, uint16_t y) {
-  return scale8(69+inoise8_raw(x,y),237)<<1;
+  //return scale8(69+inoise8_raw(x,y),237)<<1;
+    int8_t n = inoise8_raw( x, y);  // -64..+64
+    n+= 64;                         //   0..128
+    uint8_t ans = qadd8( n, n);     //   0..255
+    return ans;
 }
 
+// output range = -64 .. +64
 int8_t inoise8_raw(uint16_t x)
 {
   // Find the unit cube containing the point
@@ -421,19 +528,21 @@ int8_t inoise8_raw(uint16_t x)
   uint8_t u = x;
 
   // Get a signed version of the above for the grad function
-  int8_t xx = (x>>1) & 0x7F;
+  int8_t xx = ((uint8_t)(x)>>1) & 0x7F;
   uint8_t N = 0x80;
 
-  u = scale8(u,u);
-
+  u = EASE8( u);
+  
   int8_t ans = lerp7by8(grad8(P(AA), xx), grad8(P(BA), xx - N), u);
 
   return ans;
-  // return scale8((70+(ans)),234)<<1;
 }
 
 uint8_t inoise8(uint16_t x) {
-  return scale8(69+inoise8_raw(x), 255)<<1;
+    int8_t n = inoise8_raw(x);    //-64..+64
+    n += 64;                      // 0..128
+    uint8_t ans = qadd8(n,n);     // 0..255
+    return ans;
 }
 
 // struct q44 {
@@ -514,12 +623,12 @@ void fill_raw_2dnoise8(uint8_t *pData, int width, int height, uint8_t octaves, q
 }
 
 void fill_raw_2dnoise8(uint8_t *pData, int width, int height, uint8_t octaves, uint16_t x, int scalex, uint16_t y, int scaley, uint16_t time) {
-  fill_raw_2dnoise8(pData, width, height, octaves, q44(2,0), 171, 1, x, scalex, y, scaley, time);
+  fill_raw_2dnoise8(pData, width, height, octaves, q44(2,0), 128, 1, x, scalex, y, scaley, time);
 }
 
 void fill_raw_2dnoise16(uint16_t *pData, int width, int height, uint8_t octaves, q88 freq88, fract16 amplitude, int skip, uint32_t x, int scalex, uint32_t y, int scaley, uint32_t time) {
   if(octaves > 1) {
-    fill_raw_2dnoise16(pData, width, height, octaves-1, freq88, amplitude, skip+1, x *freq88 , scalex *freq88, y * freq88, scaley * freq88, time);
+    fill_raw_2dnoise16(pData, width, height, octaves-1, freq88, amplitude, skip, x *freq88 , scalex *freq88, y * freq88, scaley * freq88, time);
   } else {
     // amplitude is always 255 on the lowest level
     amplitude=65535;
@@ -609,7 +718,7 @@ void fill_noise8(CRGB *leds, int num_leds,
 void fill_noise16(CRGB *leds, int num_leds,
             uint8_t octaves, uint16_t x, int scale,
             uint8_t hue_octaves, uint16_t hue_x, int hue_scale,
-            uint16_t time) {
+            uint16_t time, uint8_t hue_shift) {
   uint8_t V[num_leds];
   uint8_t H[num_leds];
 
@@ -620,7 +729,7 @@ void fill_noise16(CRGB *leds, int num_leds,
   fill_raw_noise8(H,num_leds,hue_octaves,hue_x,hue_scale,time);
 
   for(int i = 0; i < num_leds; i++) {
-    leds[i] = CHSV(H[i],255,V[i]);
+    leds[i] = CHSV(H[i] + hue_shift,255,V[i]);
   }
 }
 
@@ -694,3 +803,5 @@ void fill_2dnoise16(CRGB *leds, int width, int height, bool serpentine,
     }
   }
 }
+
+FASTLED_NAMESPACE_END
