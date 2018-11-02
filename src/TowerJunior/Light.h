@@ -11,6 +11,7 @@
 //------ sizes, indexing and inter-unit data structure definitions.
 #include <Simon_Common.h>
 
+#define PIN_FASTLED 3 // to LED DI.
 #define COLOR_ORDER RGB
 #define COLOR_CORRECTION TypicalLEDStrip
 #define NUM_SAILS 4

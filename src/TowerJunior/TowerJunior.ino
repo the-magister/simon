@@ -15,14 +15,12 @@
 #include <EEPROM.h> // saving and loading radio settings
 // boostrap the tower nodeID to this value (2,3,4,5), overwriting EEPROM.
 // set "BROADCAST" to read EEPROM value
-#define HARD_SET_NODE_ID_TO BROADCAST
-//#define HARD_SET_NODE_ID_TO TOWER2
+//#define HARD_SET_NODE_ID_TO BROADCAST
+#define HARD_SET_NODE_ID_TO TOWERJUNIOR
 #include "Instruction.h"
 
 // perform lighting
 #include "Light.h"
-// pin locations for outputs
-#define PIN_FASTLED 11 // MOSI(SPI), D11 
 
 // perform fire
 #include <Timer.h> // interval timers
@@ -37,8 +35,8 @@ Light light;
 Fire fire;
 
 // remote control
-#define RESET_PIN A0
-#define MODE_SWITCH_PIN A1
+#define RESET_PIN A1
+#define MODE_SWITCH_PIN A0
 #define DEBOUNCE_TIME 100UL // need a long debounce b/c electrical noise from solenoid.
 // pulled low when triggered.
 Bounce systemReset = Bounce(RESET_PIN, DEBOUNCE_TIME);
@@ -101,6 +99,11 @@ void loop() {
     }
   }
 
+  // Check for mode switch, but do nothing.
+  if ( modeSwitch.update() ) { // mode change
+    Serial << F("Mode change detected.") << endl;
+  }
+  
   // if we're idle and we haven't received anything, cycle the lights.
   static Metro idleUpdate(IDLE_PERIOD);
 

@@ -15,7 +15,7 @@ CRGB deckColor = CRGB::FairyLight;
 void Light::begin() {
   Serial << F("Light::begin") << endl;
   
-  FastLED.addLeds<WS2811, COLOR_ORDER>(Sails, Sails.size()).setCorrection(COLOR_CORRECTION);
+  FastLED.addLeds<WS2811, PIN_FASTLED, COLOR_ORDER>(Sails, Sails.size()).setCorrection(COLOR_CORRECTION);
 
   // set master brightness control
   FastLED.setBrightness(255);
