@@ -16,7 +16,8 @@
 // boostrap the tower nodeID to this value (2,3,4,5), overwriting EEPROM.
 // set "BROADCAST" to read EEPROM value
 //#define HARD_SET_NODE_ID_TO BROADCAST
-#define HARD_SET_NODE_ID_TO TOWERJUNIOR
+//#define HARD_SET_NODE_ID_TO TOWERJUNIOR
+#define HARD_SET_NODE_ID_TO TOWER1
 #include "Instruction.h"
 
 // perform lighting

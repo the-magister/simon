@@ -18,8 +18,7 @@ enum nodeID {
   TOWER1=2,
   TOWER2=3,
   TOWER3=4,
-  TOWER4=5,
-  TOWERJUNIOR=6
+  TOWER4=5
 };
 
 // Giles 11-20
